@@ -40,8 +40,9 @@ def _get_args_defaults(env, args):
         'width': _get_config_variable(env, 'default_width', '600'),
         'height': _get_config_variable(env, 'default_height', '400'),
         'timezone': _get_config_variable(env, 'default_timezone', 'local'),
-        'closedstatus': _get_config_variable(env, 'default_closedstatus', 'closed'),
-        'reopenedstatus': _get_config_variable(env, 'default_reopenedstatus', 'reopened')}
+        'statuses': _get_config_variable(env, 'default_statuses', 'new|accepted'),
+        #if we are using ticketcreationstatus, use their value
+        'init_status': env.config.get('ticketcreationstatus', 'default', 'new')}
     defaults.update(args)
     return defaults
 
@@ -89,8 +90,8 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         days = int(args.pop('days'))
         width = int(args.pop('width'))
         height = int(args.pop('height'))
-        closedstatus = args.pop('closedstatus')
-        reopenedstatus = args.pop('reopenedstatus')
+        statuses = args.pop('statuses').split('|')
+        init_stat = args.pop('init_status')
         today = datetime.datetime.combine(
                 datetime.date.today(),
                 # last microsecond :-) of today
@@ -111,9 +112,13 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         # calculate db extra restrictions from extra parameters
         extra_parameters = []
         extra_sql = ''
+        not_allowed = re.compile(r'[^a-zA-Z0-9_]')
+        for stat in statuses:
+            if not_allowed.search(stat):
+                raise Exception('a status contained not allowed characters')
+        statuses_sql = ','.join("'{0}'".format(stat) for stat in statuses)
         if args:
             extra_sql_constraints = []
-            not_allowed = re.compile(r'[^a-zA-Z0-9]')
             for key, value in args.items():
                 if not_allowed.search(key):
                     raise Exception('a paramter contained not allowed characters')
@@ -147,26 +152,27 @@ class SimpleTicketStatsMacro(WikiMacroBase):
 
         # number of created tickets for the time period, grouped by day
         # a day has 86400 seconds
-        sql = 'SELECT COUNT(DISTINCT id), ' \
-                     'CAST((time / 86400000000) AS int) * 86400 AS date ' \
-              'FROM ticket WHERE {0} {1} time BETWEEN %s AND %s ' \
-              'GROUP BY date ORDER BY date ASC'.format(
-                    extra_sql, ' AND ' if extra_sql else '')
-        cursor.execute(sql, tuple(extra_parameters) + (sql_start, sql_end))
-        for count, timestamp in cursor:
-            # flot needs the time in milliseconds, not seconds, see
-            # https://github.com/flot/flot/blob/master/API.md#time-series-data
-            series['openedTickets'][timestamp*1000] = float(count)
+        if init_stat in statuses:
+            sql = 'SELECT COUNT(DISTINCT id), ' \
+                         'CAST((time / 86400000000) AS int) * 86400 AS date ' \
+                  'FROM ticket WHERE {0} {1} time BETWEEN %s AND %s ' \
+                  'GROUP BY date ORDER BY date ASC'.format(
+                        extra_sql, ' AND ' if extra_sql else '', statuses_sql)
+            cursor.execute(sql, tuple(extra_parameters) + (sql_start, sql_end))
+            for count, timestamp in cursor:
+                # flot needs the time in milliseconds, not seconds, see
+                # https://github.com/flot/flot/blob/master/API.md#time-series-data
+                series['openedTickets'][timestamp*1000] = float(count)
 
         # number of reopened tickets for the time period, grouped by day
         # a day has 86400 seconds
         cursor.execute("SELECT COUNT(DISTINCT tc.ticket), "
                             "CAST((tc.time / 86400000000) AS int) * 86400 as date "
                        "FROM ticket_change tc JOIN ticket t ON t.id = tc.ticket "
-                       "WHERE {0} {1} field = 'status' AND newvalue = '{2}' "
+                       "WHERE {0} {1} field = 'status' AND newvalue in ({2}) AND oldvalue NOT IN ({2}) "
                        "AND tc.time BETWEEN %s AND %s "
                        "GROUP BY date ORDER BY date ASC".format(
-                           extra_sql, ' AND ' if extra_sql else '', reopenedstatus),
+                           extra_sql, ' AND ' if extra_sql else '', statuses_sql),
                        tuple(extra_parameters) + (sql_start, sql_end))
         for count, timestamp in cursor:
             # flot needs the time in milliseconds, not seconds, see
@@ -177,10 +183,10 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         cursor.execute("SELECT COUNT(DISTINCT ticket), "
                             "CAST((tc.time / 86400000000) AS int) * 86400 AS date "
                        "FROM ticket_change tc JOIN ticket t ON t.id = tc.ticket "
-                       "WHERE {0} {1} tc.field = 'status' AND tc.newvalue = '{2}' "
+                       "WHERE {0} {1} tc.field = 'status' AND tc.newvalue not in ({2}) AND tc.oldvalue in ({2})"
                        "AND tc.time BETWEEN %s AND %s " \
                        "GROUP BY date ORDER BY date ASC".format(
-                           extra_sql, ' AND ' if extra_sql else '', closedstatus),
+                           extra_sql, ' AND ' if extra_sql else '', statuses_sql),
                        tuple(extra_parameters) + (sql_start, sql_end))
         for count, timestamp in cursor:
             # flot needs the time in milliseconds, not seconds, see
@@ -192,8 +198,8 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         # number of open tickets up to now
         cursor.execute(
             "SELECT COUNT(*) FROM ticket "
-            "WHERE {0} {1} status <> 'closed'".format(
-                extra_sql, ' AND ' if extra_sql else ''),
+            "WHERE {0} {1} status in ({2})".format(
+                extra_sql, ' AND ' if extra_sql else '', statuses_sql),
             tuple(extra_parameters))
         open_tickets = cursor.fetchone()[0]
         series['openTickets'][ts_end * 1000] = open_tickets

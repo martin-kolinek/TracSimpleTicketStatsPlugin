@@ -13,28 +13,30 @@ $(document).ready(function() {
         [
             {
                 data: closedTickets,
-                label: 'Closed',
+                label: 'Removed',
                 bars: barSettings,
                 color: 3
             },
             {
                 data: openedTickets,
-                label: 'New',
+                label: 'Added',
                 bars: barSettings,
-                color: 2
+                color: 2,
+				stack: true
             },
             {
                 data: reopenedTickets,
-                label: 'Reopened',
+                label: 'Readded',
                 bars: barSettings,
-                color: 1
+                color: 4,
+				stack: true
             },
             {
                 data: openTickets,
-                label: 'Open',
+                label: 'Current',
                 yaxis: 2,
                 lines: { show: true },
-                color: 0
+                color: '#000000'
             }
         ],
         {
