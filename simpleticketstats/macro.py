@@ -22,10 +22,7 @@ from trac.web.chrome import Chrome, ITemplateProvider, add_javascript
 from trac.wiki.macros import WikiMacroBase, parse_args
 
 from localtimezone import LocalTimeZone
-try:
-    from trac.util.datefmt import to_utimestamp as to_timestamp
-except ImportError:
-    from trac.util.datefmt import to_timestamp
+from trac.util.datefmt import to_timestamp
 
 
 def _get_config_variable(env, variable_name, default_value):
@@ -42,7 +39,9 @@ def _get_args_defaults(env, args):
         'days': _get_config_variable(env, 'default_days', '60'),
         'width': _get_config_variable(env, 'default_width', '600'),
         'height': _get_config_variable(env, 'default_height', '400'),
-        'timezone': _get_config_variable(env, 'default_timezone', 'local')}
+        'timezone': _get_config_variable(env, 'default_timezone', 'local'),
+        'closedstatus': _get_config_variable(env, 'default_closedstatus', 'closed'),
+        'reopenedstatus': _get_config_variable(env, 'default_reopenedstatus', 'reopened')}
     defaults.update(args)
     return defaults
 
@@ -90,19 +89,24 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         days = int(args.pop('days'))
         width = int(args.pop('width'))
         height = int(args.pop('height'))
+        closedstatus = args.pop('closedstatus')
+        reopenedstatus = args.pop('reopenedstatus')
         today = datetime.datetime.combine(
                 datetime.date.today(),
                 # last microsecond :-) of today
                 datetime.time(23, 59, 59, 999999, tzinfo=timezone))
-        ts_start = to_timestamp(today - timedelta(days=days))
+        time_start = today - timedelta(days=days)
+        ts_start = to_timestamp(time_start)
+        sql_start = ts_start * 1000000
         ts_end = to_timestamp(today)
+        sql_end = ts_end * 1000000
 
         # values for the template:
         data = {}
         data['title'] = title
         data['width'] = width
         data['height'] = height
-        data['id'] = ''.join(random.choice(string.lowercase) for i in range(10)) 
+        data['id'] = ''.join(str(random.randint(0,9)) for i in range(15)) 
 
         # calculate db extra restrictions from extra parameters
         extra_parameters = []
@@ -144,11 +148,11 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         # number of created tickets for the time period, grouped by day
         # a day has 86400 seconds
         sql = 'SELECT COUNT(DISTINCT id), ' \
-                     'CAST((time / 86400) AS int) * 86400 AS date ' \
+                     'CAST((time / 86400000000) AS int) * 86400 AS date ' \
               'FROM ticket WHERE {0} {1} time BETWEEN %s AND %s ' \
               'GROUP BY date ORDER BY date ASC'.format(
                     extra_sql, ' AND ' if extra_sql else '')
-        cursor.execute(sql, tuple(extra_parameters) + (ts_start, ts_end))
+        cursor.execute(sql, tuple(extra_parameters) + (sql_start, sql_end))
         for count, timestamp in cursor:
             # flot needs the time in milliseconds, not seconds, see
             # https://github.com/flot/flot/blob/master/API.md#time-series-data
@@ -157,13 +161,13 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         # number of reopened tickets for the time period, grouped by day
         # a day has 86400 seconds
         cursor.execute("SELECT COUNT(DISTINCT tc.ticket), "
-                            "CAST((tc.time / 86400) AS int) * 86400 as date "
+                            "CAST((tc.time / 86400000000) AS int) * 86400 as date "
                        "FROM ticket_change tc JOIN ticket t ON t.id = tc.ticket "
-                       "WHERE {0} {1} field = 'status' AND newvalue = 'reopened' "
+                       "WHERE {0} {1} field = 'status' AND newvalue = '{2}' "
                        "AND tc.time BETWEEN %s AND %s "
                        "GROUP BY date ORDER BY date ASC".format(
-                           extra_sql, ' AND ' if extra_sql else ''),
-                       tuple(extra_parameters) + (ts_start, ts_end))
+                           extra_sql, ' AND ' if extra_sql else '', reopenedstatus),
+                       tuple(extra_parameters) + (sql_start, sql_end))
         for count, timestamp in cursor:
             # flot needs the time in milliseconds, not seconds, see
             # https://github.com/flot/flot/blob/master/API.md#time-series-data
@@ -171,17 +175,17 @@ class SimpleTicketStatsMacro(WikiMacroBase):
 
         # number of closed tickets for the time period, grouped by day (ms)
         cursor.execute("SELECT COUNT(DISTINCT ticket), "
-                            "CAST((tc.time / 86400) AS int) * 86400 AS date "
+                            "CAST((tc.time / 86400000000) AS int) * 86400 AS date "
                        "FROM ticket_change tc JOIN ticket t ON t.id = tc.ticket "
-                       "WHERE {0} {1} tc.field = 'status' AND tc.newvalue = 'closed' "
+                       "WHERE {0} {1} tc.field = 'status' AND tc.newvalue = '{2}' "
                        "AND tc.time BETWEEN %s AND %s " \
                        "GROUP BY date ORDER BY date ASC".format(
-                           extra_sql, ' AND ' if extra_sql else ''),
-                       tuple(extra_parameters) + (ts_start, ts_end))
+                           extra_sql, ' AND ' if extra_sql else '', closedstatus),
+                       tuple(extra_parameters) + (sql_start, sql_end))
         for count, timestamp in cursor:
             # flot needs the time in milliseconds, not seconds, see
             # https://github.com/flot/flot/blob/master/API.md#time-series-data
-            series['closedTickets'][float(timestamp*1000)] = float(count)
+            series['closedTickets'][float(timestamp*1000)] = -float(count)
 
         # calculate number of open tickets for each day
         
@@ -194,8 +198,9 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         open_tickets = cursor.fetchone()[0]
         series['openTickets'][ts_end * 1000] = open_tickets
 
-        for day_ms in range(math.floor(ts_end / 86400.0) * 86400000, ts_start * 1000, -86400000):
-            open_tickets += series['closedTickets'].get(day_ms, 0)
+        formatter.env.log.debug('ts_end = {0}, ts_start = {1}'.format(ts_end, ts_start))
+        for day_ms in range(long(math.floor(ts_end / 86400.0) * 86400000), long(ts_start * 1000), -86400000):
+            open_tickets -= series['closedTickets'].get(day_ms, 0)
             open_tickets -= series['openedTickets'].get(day_ms, 0)
             open_tickets -= series['reopenedTickets'].get(day_ms, 0)
             series['openTickets'][day_ms] = open_tickets
@@ -215,4 +220,5 @@ class SimpleTicketStatsMacro(WikiMacroBase):
         add_javascript(formatter.req, 'stsm/js/simpleticketstats.js')
         template = Chrome(self.env).load_template(
                 'simpleticketstats_macro.html', method='text')
+        formatter.env.log.debug(data)
         return Markup(template.generate(**data))

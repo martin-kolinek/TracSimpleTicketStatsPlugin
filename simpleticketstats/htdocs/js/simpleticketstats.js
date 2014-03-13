@@ -39,8 +39,8 @@ $(document).ready(function() {
         ],
         {
             xaxis: { mode: 'time', minTickSize: [1, "day"] },
-            yaxis: { min: 0, label: 'Tickets' },
-            y2axis: { min: 0 },
+            yaxis: { label: 'Tickets' },
+            y2axis: { },
             legend: { position: 'nw' }
         });
     });
